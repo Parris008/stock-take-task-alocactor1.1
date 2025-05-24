@@ -1,16 +1,17 @@
 import streamlit as st
 import pandas as pd
 import time
+import os
 from collections import Counter, defaultdict
 
 st.set_page_config(page_title="Task Allocator + Tracker", layout="wide")
 st.title("Task Allocator and Team Tracker")
 
-# Page selector
+# Constants
+ALLOCATED_FILE = "allocated_tasks.csv"
+
 view_mode = st.radio("Select View", ["Lead View", "Team Member View"])
 
-if "allocation_data" not in st.session_state:
-    st.session_state.allocation_data = None
 if "task_state" not in st.session_state:
     st.session_state.task_state = {}
 
@@ -46,7 +47,6 @@ if view_mode == "Lead View":
             member["used_time"] = 0
             member["locked_zone"] = None
 
-        zone_assignments = Counter()
         zone_remaining_tasks = defaultdict(int)
         for task in tasks_sorted:
             pr = str(task["priority"]).lower()
@@ -121,9 +121,9 @@ if view_mode == "Lead View":
                 })
 
         result_df = pd.DataFrame(allocation_preview)
-        st.session_state.allocation_data = result_df
+        result_df.to_csv(ALLOCATED_FILE, index=False)
 
-        st.success("Tasks allocated and saved for team view.")
+        st.success("Tasks allocated and saved to shared file.")
         st.dataframe(result_df)
 
         if unassigned_tasks:
@@ -133,10 +133,10 @@ if view_mode == "Lead View":
 elif view_mode == "Team Member View":
     st.header("Team Member View")
 
-    if st.session_state.allocation_data is None:
-        st.warning("No allocation data available. Please run the Lead View first.")
+    if not os.path.exists(ALLOCATED_FILE):
+        st.warning("No allocation file found. Please ask the lead to run the allocator.")
     else:
-        df = st.session_state.allocation_data.copy()
+        df = pd.read_csv(ALLOCATED_FILE)
         df.columns = df.columns.str.strip().str.lower()
 
         team_members = df["team member"].unique().tolist()
@@ -192,4 +192,5 @@ elif view_mode == "Team Member View":
         progress = int((completed / total_tasks) * 100)
         st.progress(progress / 100)
         st.markdown(f"**Progress: {completed} of {total_tasks} tasks complete ({progress}%)**")
+
 
