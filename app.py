@@ -1,10 +1,9 @@
-
 import streamlit as st
 import pandas as pd
-from collections import defaultdict, Counter
+from collections import Counter, defaultdict
 
 st.set_page_config(page_title="Task Allocator", layout="wide")
-st.title("Task Allocator (Even Zone Distribution After FZ/DY)")
+st.title("Task Allocator (Dynamic Zone Reassignment + Filters + Rules)")
 
 st.markdown("Upload your task and team files below.")
 
@@ -43,17 +42,15 @@ if task_file and team_file:
             member["locked_zone"] = None
 
         zone_assignments = Counter()
-        zone_load = Counter()
-
-        # Determine unique zones from non-FZ/DY tasks
-        non_fz_dy_zones = set()
+        zone_remaining_tasks = defaultdict(int)
         for task in tasks_sorted:
-            pr = str(task.get("priority", "")).strip().lower()
+            pr = str(task["priority"]).lower()
             if pr not in ["fz", "dy"]:
-                non_fz_dy_zones.add(task.get("zone", ""))
+                zone_remaining_tasks[task["zone"]] += 1
 
-        non_fz_dy_zones = sorted(non_fz_dy_zones)
+        non_fz_dy_zones = sorted(zone_remaining_tasks)
         zone_cycle = iter(non_fz_dy_zones)
+        unassigned_tasks = []
 
         for task in tasks_sorted:
             best_fit = None
@@ -69,8 +66,8 @@ if task_file and team_file:
                 adjusted_time = task_time / speed if speed else 0
                 if member["used_time"] + adjusted_time <= 300:
                     if task_priority not in ["fz", "dy"]:
+                        # Assign initial locked zone
                         if not member["locked_zone"]:
-                            # Evenly assign members to zones using cycling
                             try:
                                 next_zone = next(zone_cycle)
                             except StopIteration:
@@ -78,7 +75,14 @@ if task_file and team_file:
                                 next_zone = next(zone_cycle)
                             member["locked_zone"] = next_zone
 
+                        # Allow switching zones if member's current zone is done
                         if member["locked_zone"] != task_zone:
+                            if zone_remaining_tasks[member["locked_zone"]] > 0:
+                                continue
+                            else:
+                                member["locked_zone"] = task_zone
+
+                        if len(member["assigned"]) == 0 and speed < 1.0 and task_difficulty >= 4:
                             continue
 
                     if member["used_time"] < min_used_time:
@@ -96,11 +100,15 @@ if task_file and team_file:
                     "zone": task_zone
                 })
                 best_fit["used_time"] += adjusted_time
-                if task_priority not in ["fz", "dy"] and not best_fit["locked_zone"]:
-                    best_fit["locked_zone"] = task_zone
+                if task_priority not in ["fz", "dy"]:
+                    zone_remaining_tasks[task_zone] -= 1
+            else:
+                unassigned_tasks.append(task)
 
         allocation_preview = []
+        all_names = []
         for member in team:
+            all_names.append(member["name"])
             for task in member["assigned"]:
                 allocation_preview.append({
                     "Team Member": member["name"],
@@ -114,9 +122,19 @@ if task_file and team_file:
                 })
 
         result_df = pd.DataFrame(allocation_preview)
+
+        st.markdown("### Filter by Team Member")
+        selected_member = st.selectbox("Select team member", ["All"] + all_names)
+        if selected_member != "All":
+            result_df = result_df[result_df["Team Member"] == selected_member]
+
         st.markdown("### Allocated Tasks")
         st.dataframe(result_df)
 
         csv = result_df.to_csv(index=False).encode("utf-8")
         st.download_button("Download Allocation CSV", csv, "allocation_result.csv", "text/csv")
+
+        if unassigned_tasks:
+            st.markdown("### Unassigned Tasks")
+            st.dataframe(pd.DataFrame(unassigned_tasks)[["id", "time", "priority", "difficulty", "zone"]])
 
