@@ -1,0 +1,3 @@
+treamlit
+firebase-admin
+pandas
