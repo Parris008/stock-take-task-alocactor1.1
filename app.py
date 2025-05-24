@@ -1,27 +1,32 @@
 import streamlit as st
 import pandas as pd
+import time
 from collections import Counter, defaultdict
 
-st.set_page_config(page_title="Task Allocator", layout="wide")
-st.title("Task Allocator (Dynamic Zone Reassignment + Filters + Rules)")
+st.set_page_config(page_title="Task Allocator + Tracker", layout="wide")
+st.title("Task Allocator and Team Tracker")
 
-st.markdown("Upload your task and team files below.")
+# Page selector
+view_mode = st.radio("Select View", ["Lead View", "Team Member View"])
 
-task_file = st.file_uploader("Upload tasks.csv", type="csv")
-team_file = st.file_uploader("Upload team.csv", type="csv")
+if "allocation_data" not in st.session_state:
+    st.session_state.allocation_data = None
+if "task_state" not in st.session_state:
+    st.session_state.task_state = {}
 
-if task_file and team_file:
-    tasks_df = pd.read_csv(task_file)
-    team_df = pd.read_csv(team_file)
+if view_mode == "Lead View":
+    st.header("Lead View: Allocate Tasks")
 
-    tasks_df.columns = tasks_df.columns.str.strip().str.lower()
-    team_df.columns = team_df.columns.str.strip().str.lower()
+    task_file = st.file_uploader("Upload tasks.csv", type="csv")
+    team_file = st.file_uploader("Upload team.csv", type="csv")
 
-    required_task_cols = {"id", "time", "priority", "difficulty", "zone"}
-    required_team_cols = {"name", "speed"}
-    if not required_task_cols.issubset(tasks_df.columns) or not required_team_cols.issubset(team_df.columns):
-        st.error("Missing required columns in one of the files. Please check headers.")
-    else:
+    if task_file and team_file:
+        tasks_df = pd.read_csv(task_file)
+        team_df = pd.read_csv(team_file)
+
+        tasks_df.columns = tasks_df.columns.str.strip().str.lower()
+        team_df.columns = team_df.columns.str.strip().str.lower()
+
         def priority_key(row):
             priority = str(row.get('priority', '')).strip().lower()
             if priority == 'fz':
@@ -66,7 +71,6 @@ if task_file and team_file:
                 adjusted_time = task_time / speed if speed else 0
                 if member["used_time"] + adjusted_time <= 300:
                     if task_priority not in ["fz", "dy"]:
-                        # Assign initial locked zone
                         if not member["locked_zone"]:
                             try:
                                 next_zone = next(zone_cycle)
@@ -74,14 +78,11 @@ if task_file and team_file:
                                 zone_cycle = iter(non_fz_dy_zones)
                                 next_zone = next(zone_cycle)
                             member["locked_zone"] = next_zone
-
-                        # Allow switching zones if member's current zone is done
                         if member["locked_zone"] != task_zone:
                             if zone_remaining_tasks[member["locked_zone"]] > 0:
                                 continue
                             else:
                                 member["locked_zone"] = task_zone
-
                         if len(member["assigned"]) == 0 and speed < 1.0 and task_difficulty >= 4:
                             continue
 
@@ -106,9 +107,7 @@ if task_file and team_file:
                 unassigned_tasks.append(task)
 
         allocation_preview = []
-        all_names = []
         for member in team:
-            all_names.append(member["name"])
             for task in member["assigned"]:
                 allocation_preview.append({
                     "Team Member": member["name"],
@@ -122,19 +121,73 @@ if task_file and team_file:
                 })
 
         result_df = pd.DataFrame(allocation_preview)
+        st.session_state.allocation_data = result_df
 
-        st.markdown("### Filter by Team Member")
-        selected_member = st.selectbox("Select team member", ["All"] + all_names)
-        if selected_member != "All":
-            result_df = result_df[result_df["Team Member"] == selected_member]
-
-        st.markdown("### Allocated Tasks")
+        st.success("Tasks allocated and saved for team view.")
         st.dataframe(result_df)
-
-        csv = result_df.to_csv(index=False).encode("utf-8")
-        st.download_button("Download Allocation CSV", csv, "allocation_result.csv", "text/csv")
 
         if unassigned_tasks:
             st.markdown("### Unassigned Tasks")
             st.dataframe(pd.DataFrame(unassigned_tasks)[["id", "time", "priority", "difficulty", "zone"]])
+
+elif view_mode == "Team Member View":
+    st.header("Team Member View")
+
+    if st.session_state.allocation_data is None:
+        st.warning("No allocation data available. Please run the Lead View first.")
+    else:
+        df = st.session_state.allocation_data
+        team_members = df["Team Member"].unique().tolist()
+        selected_member = st.selectbox("Select your name", team_members)
+
+        member_tasks = df[df["Team Member"] == selected_member].reset_index(drop=True)
+        total_tasks = len(member_tasks)
+        completed = 0
+
+        st.markdown(f"### Layouts Assigned to {selected_member}")
+
+        for idx, row in member_tasks.iterrows():
+            task_id = row["task id"]
+            adjusted_time = row["adjusted time (mins)"]
+            zone = row["zone"]
+
+            if task_id not in st.session_state.task_state:
+                st.session_state.task_state[task_id] = {
+                    "started": False,
+                    "start_time": None,
+                    "completed": False,
+                    "complete_time": None,
+                    "adjusted_time": adjusted_time
+                }
+
+            task = st.session_state.task_state[task_id]
+
+            with st.expander(f"{idx+1}. {task_id} ({zone})"):
+                st.write(f"Estimated Time: {adjusted_time} mins")
+
+                if idx == 0 or all(st.session_state.task_state[member_tasks.loc[i, 'task id']]['completed'] for i in range(idx)):
+                    if not task["started"]:
+                        if st.button(f"Start {task_id}", key=f"start_{task_id}"):
+                            task["started"] = True
+                            task["start_time"] = time.time()
+
+                    if task["started"] and not task["completed"]:
+                        elapsed = (time.time() - task["start_time"]) / 60
+                        delta = round(elapsed - adjusted_time, 1)
+                        status = "Ahead" if delta < 0 else "Behind"
+                        st.write(f"Elapsed: {round(elapsed,1)} mins")
+                        st.write(f"Status: {status} ({abs(delta)} mins {'early' if delta < 0 else 'late'})")
+                        if st.button(f"Complete {task_id}", key=f"complete_{task_id}"):
+                            task["completed"] = True
+                            task["complete_time"] = time.time()
+
+                    if task["completed"]:
+                        st.success("Completed")
+                        completed += 1
+                else:
+                    st.warning("This layout is locked until the previous one is complete.")
+
+        progress = int((completed / total_tasks) * 100)
+        st.progress(progress / 100)
+        st.markdown(f"**Progress: {completed} of {total_tasks} tasks complete ({progress}%)**")
 
