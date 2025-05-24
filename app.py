@@ -1,10 +1,10 @@
 
 import streamlit as st
 import pandas as pd
-from collections import Counter
+from collections import defaultdict, Counter
 
 st.set_page_config(page_title="Task Allocator", layout="wide")
-st.title("Task Allocator (Balanced Zones + Filters + Rules)")
+st.title("Task Allocator (Even Zone Distribution After FZ/DY)")
 
 st.markdown("Upload your task and team files below.")
 
@@ -45,11 +45,15 @@ if task_file and team_file:
         zone_assignments = Counter()
         zone_load = Counter()
 
-        non_fz_dy_zones = sorted(set(
-            task["zone"] for task in tasks_sorted if str(task["priority"]).lower() not in ["fz", "dy"]
-        ))
+        # Determine unique zones from non-FZ/DY tasks
+        non_fz_dy_zones = set()
+        for task in tasks_sorted:
+            pr = str(task.get("priority", "")).strip().lower()
+            if pr not in ["fz", "dy"]:
+                non_fz_dy_zones.add(task.get("zone", ""))
+
+        non_fz_dy_zones = sorted(non_fz_dy_zones)
         zone_cycle = iter(non_fz_dy_zones)
-        unassigned_tasks = []
 
         for task in tasks_sorted:
             best_fit = None
@@ -66,16 +70,15 @@ if task_file and team_file:
                 if member["used_time"] + adjusted_time <= 300:
                     if task_priority not in ["fz", "dy"]:
                         if not member["locked_zone"]:
+                            # Evenly assign members to zones using cycling
                             try:
                                 next_zone = next(zone_cycle)
                             except StopIteration:
                                 zone_cycle = iter(non_fz_dy_zones)
                                 next_zone = next(zone_cycle)
                             member["locked_zone"] = next_zone
+
                         if member["locked_zone"] != task_zone:
-                            continue
-                        # Restriction: slow member can't get 4+ difficulty as first post-FZ/DY task
-                        if len(member["assigned"]) == 0 and speed < 1.0 and task_difficulty >= 4:
                             continue
 
                     if member["used_time"] < min_used_time:
@@ -95,13 +98,9 @@ if task_file and team_file:
                 best_fit["used_time"] += adjusted_time
                 if task_priority not in ["fz", "dy"] and not best_fit["locked_zone"]:
                     best_fit["locked_zone"] = task_zone
-            else:
-                unassigned_tasks.append(task)
 
         allocation_preview = []
-        all_names = []
         for member in team:
-            all_names.append(member["name"])
             for task in member["assigned"]:
                 allocation_preview.append({
                     "Team Member": member["name"],
@@ -115,18 +114,9 @@ if task_file and team_file:
                 })
 
         result_df = pd.DataFrame(allocation_preview)
-
-        st.markdown("### Filter by Team Member")
-        selected_member = st.selectbox("Select team member", ["All"] + all_names)
-        if selected_member != "All":
-            result_df = result_df[result_df["Team Member"] == selected_member]
-
         st.markdown("### Allocated Tasks")
         st.dataframe(result_df)
 
         csv = result_df.to_csv(index=False).encode("utf-8")
         st.download_button("Download Allocation CSV", csv, "allocation_result.csv", "text/csv")
 
-        if unassigned_tasks:
-            st.markdown("### Unassigned Tasks")
-            st.dataframe(pd.DataFrame(unassigned_tasks)[["id", "time", "priority", "difficulty", "zone"]])
