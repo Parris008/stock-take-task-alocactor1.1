@@ -1,14 +1,19 @@
 import streamlit as st
 import pandas as pd
 import time
-import os
+import firebase_admin
+from firebase_admin import credentials, firestore
 from collections import Counter, defaultdict
 
-st.set_page_config(page_title="Task Allocator + Tracker", layout="wide")
-st.title("Task Allocator and Team Tracker")
+if "firebase_app" not in st.session_state:
+    cred = credentials.Certificate("task-allocator-17f79-firebase-adminsdk-fbsvc-7db86ff117.json")
+    firebase_admin.initialize_app(cred)
+    st.session_state.firebase_app = True
 
-# Constants
-ALLOCATED_FILE = "allocated_tasks.csv"
+db = firestore.client()
+
+st.set_page_config(page_title="Task Allocator + Tracker (Firebase)", layout="wide")
+st.title("Task Allocator and Team Tracker (Firebase Edition)")
 
 view_mode = st.radio("Select View", ["Lead View", "Team Member View"])
 
@@ -35,7 +40,7 @@ if view_mode == "Lead View":
             elif priority == 'dy':
                 return (1, row.get('zone', ''), -row.get('difficulty', 0))
             else:
-                priority_rank = {"high": 2, "medium": 3, "low": 4}
+                priority_rank = {'high': 2, 'medium': 3, 'low': 4}
                 return (priority_rank.get(priority, 5), row.get('zone', ''), -row.get('difficulty', 0))
 
         tasks_df["sort_key"] = tasks_df.apply(priority_key, axis=1)
@@ -56,6 +61,9 @@ if view_mode == "Lead View":
         non_fz_dy_zones = sorted(zone_remaining_tasks)
         zone_cycle = iter(non_fz_dy_zones)
         unassigned_tasks = []
+
+        for doc in db.collection("allocations").stream():
+            db.collection("allocations").document(doc.id).delete()
 
         for task in tasks_sorted:
             best_fit = None
@@ -92,40 +100,27 @@ if view_mode == "Lead View":
 
             if best_fit:
                 adjusted_time = task_time / best_fit["speed"] if best_fit["speed"] else 0
-                best_fit["assigned"].append({
+                task_data = {
+                    "team_member": best_fit["name"],
                     "task_id": task_id,
                     "base_time": task_time,
                     "adjusted_time": round(adjusted_time, 1),
                     "priority": task.get("priority", ""),
                     "difficulty": task_difficulty,
-                    "zone": task_zone
-                })
+                    "zone": task_zone,
+                    "started": False,
+                    "completed": False,
+                    "start_time": None,
+                    "complete_time": None,
+                }
+                db.collection("allocations").add(task_data)
                 best_fit["used_time"] += adjusted_time
                 if task_priority not in ["fz", "dy"]:
                     zone_remaining_tasks[task_zone] -= 1
             else:
                 unassigned_tasks.append(task)
 
-        allocation_preview = []
-        for member in team:
-            for task in member["assigned"]:
-                allocation_preview.append({
-                    "Team Member": member["name"],
-                    "Task ID": task["task_id"],
-                    "Base Time (mins)": task["base_time"],
-                    "Adjusted Time (mins)": task["adjusted_time"],
-                    "Priority": task["priority"],
-                    "Difficulty": task["difficulty"],
-                    "Zone": task["zone"],
-                    "Total Time Used (mins)": round(member["used_time"], 1)
-                })
-
-        result_df = pd.DataFrame(allocation_preview)
-        result_df.to_csv(ALLOCATED_FILE, index=False)
-
-        st.success("Tasks allocated and saved to shared file.")
-        st.dataframe(result_df)
-
+        st.success("Tasks allocated and stored in Firebase.")
         if unassigned_tasks:
             st.markdown("### Unassigned Tasks")
             st.dataframe(pd.DataFrame(unassigned_tasks)[["id", "time", "priority", "difficulty", "zone"]])
@@ -133,57 +128,52 @@ if view_mode == "Lead View":
 elif view_mode == "Team Member View":
     st.header("Team Member View")
 
-    if not os.path.exists(ALLOCATED_FILE):
-        st.warning("No allocation file found. Please ask the lead to run the allocator.")
-    else:
-        df = pd.read_csv(ALLOCATED_FILE)
-        df.columns = df.columns.str.strip().str.lower()
+    allocations = db.collection("allocations").stream()
+    records = [doc.to_dict() | {"doc_id": doc.id} for doc in allocations]
 
-        team_members = df["team member"].unique().tolist()
+    if not records:
+        st.warning("No tasks allocated yet.")
+    else:
+        df = pd.DataFrame(records)
+        df.columns = df.columns.str.strip().str.lower()
+        team_members = df["team_member"].unique().tolist()
         selected_member = st.selectbox("Select your name", team_members)
 
-        member_tasks = df[df["team member"] == selected_member].reset_index(drop=True)
+        member_tasks = df[df["team_member"] == selected_member].reset_index(drop=True)
         total_tasks = len(member_tasks)
         completed = 0
 
         st.markdown(f"### Layouts Assigned to {selected_member}")
 
         for idx, row in member_tasks.iterrows():
-            task_id = row["task id"]
-            adjusted_time = row["adjusted time (mins)"]
+            task_id = row["task_id"]
+            adjusted_time = row["adjusted_time"]
             zone = row["zone"]
-
-            if task_id not in st.session_state.task_state:
-                st.session_state.task_state[task_id] = {
-                    "started": False,
-                    "start_time": None,
-                    "completed": False,
-                    "complete_time": None,
-                    "adjusted_time": adjusted_time
-                }
-
-            task = st.session_state.task_state[task_id]
+            doc_id = row["doc_id"]
 
             with st.expander(f"{idx+1}. {task_id} ({zone})"):
                 st.write(f"Estimated Time: {adjusted_time} mins")
 
-                if idx == 0 or all(st.session_state.task_state[member_tasks.loc[i, 'task id']]['completed'] for i in range(idx)):
-                    if not task["started"]:
+                if idx == 0 or all(member_tasks.loc[i, 'completed'] for i in range(idx)):
+                    if not row["started"]:
                         if st.button(f"Start {task_id}", key=f"start_{task_id}"):
-                            task["started"] = True
-                            task["start_time"] = time.time()
+                            db.collection("allocations").document(doc_id).update({
+                                "started": True,
+                                "start_time": firestore.SERVER_TIMESTAMP
+                            })
+                            st.rerun()
 
-                    if task["started"] and not task["completed"]:
-                        elapsed = (time.time() - task["start_time"]) / 60
-                        delta = round(elapsed - adjusted_time, 1)
-                        status = "Ahead" if delta < 0 else "Behind"
-                        st.write(f"Elapsed: {round(elapsed,1)} mins")
-                        st.write(f"Status: {status} ({abs(delta)} mins {'early' if delta < 0 else 'late'})")
+                    elif not row["completed"]:
                         if st.button(f"Complete {task_id}", key=f"complete_{task_id}"):
-                            task["completed"] = True
-                            task["complete_time"] = time.time()
+                            db.collection("allocations").document(doc_id).update({
+                                "completed": True,
+                                "complete_time": firestore.SERVER_TIMESTAMP
+                            })
+                            st.rerun()
 
-                    if task["completed"]:
+                        st.info("In Progress")
+
+                    elif row["completed"]:
                         st.success("Completed")
                         completed += 1
                 else:
