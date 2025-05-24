@@ -137,6 +137,7 @@ elif view_mode == "Team Member View":
         st.warning("No allocation data available. Please run the Lead View first.")
     else:
         df = st.session_state.allocation_data
+        df.columns = df.columns.str.strip().str.lower()
         team_members = df["Team Member"].unique().tolist()
         selected_member = st.selectbox("Select your name", team_members)
 
